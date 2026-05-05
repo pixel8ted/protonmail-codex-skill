@@ -1,0 +1,4 @@
+interface:
+  display_name: "Proton Mail"
+  short_description: "Read, search, and send Proton Mail"
+  default_prompt: "Use $protonmail to search my Proton Mail inbox for recent messages and summarize the results."
