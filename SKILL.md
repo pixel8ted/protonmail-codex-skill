@@ -30,7 +30,7 @@ If variables are missing, the helper script automatically reads `~/.config/codex
 
 If credentials are still missing, ask the user to provide Bridge local credentials or point to a local config file. Never print passwords back to the user. Avoid writing credentials into the skill folder, source files, command history examples, or generated artifacts.
 
-Bridge commonly uses a local self-signed TLS certificate. When using the helper script, keep certificate verification enabled by default for remote hosts and use the explicit local Bridge mode only for `127.0.0.1` or `localhost`.
+The helper accepts only hosts that resolve exclusively to loopback addresses and connects only to those validated numeric addresses, preserving IPv4/IPv6 fallback. It always completes STARTTLS before authentication. Endpoint lookup may parse credential values from the same config file before TLS, but does not transmit them. Local self-signed Bridge certificates are supported. Configure endpoints and ports only through the trusted environment or config file; CLI host/port overrides and `--no-starttls` are not supported. Plaintext and remote Bridge configurations are rejected.
 
 ## Quick Start
 
@@ -95,6 +95,6 @@ If connection fails:
 - Confirm the user has a paid Proton Mail plan if Bridge availability is in question.
 - Confirm IMAP/SMTP host and port from Bridge settings; do not assume defaults if the user's Bridge shows different values.
 - Test folder listing before search or send.
-- If TLS verification fails against localhost, use the helper's local Bridge TLS mode rather than disabling verification for arbitrary hosts.
+- Configure Bridge's IMAP/SMTP connection security as STARTTLS. The helper's local Bridge TLS mode accepts its self-signed certificate on validated loopback addresses; plaintext authentication is not supported.
 
 Do not claim Proton provides a general public consumer Mail API unless the user supplies current official documentation for one. Default to Bridge.

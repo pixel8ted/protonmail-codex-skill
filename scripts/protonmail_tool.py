@@ -12,10 +12,12 @@ import email
 import getpass
 import html
 import imaplib
+import ipaddress
 import os
 import re
 import shlex
 import smtplib
+import socket
 import ssl
 import sys
 from datetime import datetime
@@ -67,7 +69,35 @@ def env(name: str, default_value: str | None = None) -> str | None:
 
 
 def is_local_host(host: str) -> bool:
-    return host in {"127.0.0.1", "localhost", "::1"}
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def connection_settings(protocol: str) -> tuple[list[str], int]:
+    """Validate the configured endpoint, then pin numeric loopback addresses."""
+    host = env(f"PROTONMAIL_{protocol}_HOST", "127.0.0.1")
+    default_port = DEFAULT_IMAP_PORT if protocol == "IMAP" else DEFAULT_SMTP_PORT
+    try:
+        port = int(env(f"PROTONMAIL_{protocol}_PORT", str(default_port)))
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise SystemExit(f"Invalid {protocol} port.") from None
+    if not host or "%" in host:
+        raise SystemExit(f"{protocol} host must resolve exclusively to loopback addresses.")
+    try:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        raise SystemExit(f"Unable to resolve {protocol} host.") from None
+    if not addresses or any(not is_local_host(item[4][0]) for item in addresses):
+        raise SystemExit(f"{protocol} host must resolve exclusively to loopback addresses.")
+    # Prefer IPv4 for Bridge's usual listener. Never pass the hostname onward:
+    # a second name lookup could return a different, non-local destination.
+    addresses.sort(key=lambda item: item[0] != socket.AF_INET)
+    hosts = list(dict.fromkeys(str(ipaddress.ip_address(item[4][0])) for item in addresses))
+    return hosts, port
 
 
 def tls_context(host: str, verify: bool) -> ssl.SSLContext:
@@ -89,27 +119,45 @@ def credentials(args: argparse.Namespace) -> tuple[str, str]:
 
 
 def connect_imap(args: argparse.Namespace) -> imaplib.IMAP4:
-    host = args.imap_host or env("PROTONMAIL_IMAP_HOST", "127.0.0.1")
-    port = int(args.imap_port or env("PROTONMAIL_IMAP_PORT", str(DEFAULT_IMAP_PORT)))
-    username, password = credentials(args)
-    imap = imaplib.IMAP4(host, port)
-    if not args.no_starttls:
+    hosts, port = connection_settings("IMAP")
+    for host in hosts:
+        try:
+            imap = imaplib.IMAP4(host, port)
+        except OSError:
+            if host == hosts[-1]:
+                raise
+        else:
+            break
+    try:
         imap.starttls(ssl_context=tls_context(host, not args.local_bridge_tls))
-    imap.login(username, password)
+        username, password = credentials(args)
+        imap.login(username, password)
+    except BaseException:
+        imap.shutdown()
+        raise
     return imap
 
 
-def connect_smtp(args: argparse.Namespace) -> smtplib.SMTP:
-    host = args.smtp_host or env("PROTONMAIL_SMTP_HOST", "127.0.0.1")
-    port = int(args.smtp_port or env("PROTONMAIL_SMTP_PORT", str(DEFAULT_SMTP_PORT)))
-    username, password = credentials(args)
-    smtp = smtplib.SMTP(host, port, timeout=30)
-    smtp.ehlo()
-    if not args.no_starttls:
+def connect_smtp(args: argparse.Namespace) -> tuple[smtplib.SMTP, str]:
+    hosts, port = connection_settings("SMTP")
+    for host in hosts:
+        try:
+            smtp = smtplib.SMTP(host, port, timeout=30)
+        except OSError:
+            if host == hosts[-1]:
+                raise
+        else:
+            break
+    try:
+        smtp.ehlo()
         smtp.starttls(context=tls_context(host, not args.local_bridge_tls))
         smtp.ehlo()
-    smtp.login(username, password)
-    return smtp
+        username, password = credentials(args)
+        smtp.login(username, password)
+    except BaseException:
+        smtp.close()
+        raise
+    return smtp, username
 
 
 def decode_header_value(value: str | None) -> str:
@@ -314,10 +362,7 @@ def read_body(args: argparse.Namespace) -> str:
 
 
 def send(args: argparse.Namespace) -> int:
-    username, _ = credentials(args)
-    from_addr = args.from_addr or env("PROTONMAIL_FROM") or username
     msg = EmailMessage()
-    msg["From"] = from_addr
     msg["To"] = ", ".join(args.to)
     if args.cc:
         msg["Cc"] = ", ".join(args.cc)
@@ -331,8 +376,10 @@ def send(args: argparse.Namespace) -> int:
     msg.set_content(read_body(args))
 
     recipients = args.to + (args.cc or []) + (args.bcc or [])
-    smtp = connect_smtp(args)
+    smtp, username = connect_smtp(args)
     try:
+        from_addr = args.from_addr or env("PROTONMAIL_FROM") or username
+        msg["From"] = from_addr
         smtp.send_message(msg, from_addr=from_addr, to_addrs=recipients)
     finally:
         smtp.quit()
@@ -342,11 +389,6 @@ def send(args: argparse.Namespace) -> int:
 
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--username", help="Bridge username. Prefer PROTONMAIL_USERNAME.")
-    parser.add_argument("--imap-host", help="IMAP host. Defaults to PROTONMAIL_IMAP_HOST or 127.0.0.1.")
-    parser.add_argument("--imap-port", type=int, help="IMAP port. Defaults to PROTONMAIL_IMAP_PORT or 1143.")
-    parser.add_argument("--smtp-host", help="SMTP host. Defaults to PROTONMAIL_SMTP_HOST or 127.0.0.1.")
-    parser.add_argument("--smtp-port", type=int, help="SMTP port. Defaults to PROTONMAIL_SMTP_PORT or 1025.")
-    parser.add_argument("--no-starttls", action="store_true", help="Disable STARTTLS.")
     parser.add_argument(
         "--local-bridge-tls",
         action="store_true",
